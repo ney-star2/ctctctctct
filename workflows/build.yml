@@ -1,0 +1,77 @@
+name: Build VST3
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  dsp-tests:
+    name: DSP tests (loudness, true-peak, limiter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run tests
+        run: |
+          g++ -std=c++17 -O2 -Wall -Wextra -ISource Tests/DspTest.cpp -o dsptest
+          ./dsptest
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: dsp-tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          - name: macOS
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vst = Get-ChildItem -Path build -Recurse -Directory -Filter "*.vst3" | Select-Object -First 1
+          if (-not $vst) { throw "No .vst3 produced" }
+          Compress-Archive -Path $vst.FullName -DestinationPath "BoomBapMaster-Windows-VST3.zip"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          VST=$(find build -type d -name "*.vst3" | head -n 1)
+          test -n "$VST" || { echo "No .vst3 produced"; exit 1; }
+          ditto -c -k --keepParent "$VST" BoomBapMaster-macOS-VST3.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BoomBapMaster-${{ matrix.name }}-VST3
+          path: BoomBapMaster-*-VST3.zip
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
